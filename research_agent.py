@@ -27,6 +27,8 @@ MAX_MINUTES   = 30
 MAX_COST_USD  = 10.00
 OUTPUT_FILE   = "research_dossier.md"
 MAX_PAUSE_CONTINUATIONS = 5           # per task, handles server-side tool limits
+MAX_RETRIES   = 5                     # retries on rate limit (429)
+RETRY_WAIT_S  = 65                    # seconds to wait — just over 1 min window
 
 # Sonnet 4.6 pricing ($/1M tokens)
 PRICE_INPUT  = 3.00
@@ -182,24 +184,43 @@ def research_one_task(
     all_text: list[str] = []
 
     for _ in range(MAX_PAUSE_CONTINUATIONS):
-        with client.messages.stream(
-            model=MODEL,
-            max_tokens=4096,
-            thinking={"type": "adaptive"},
-            output_config={"effort": EFFORT},
-            system=SYSTEM_PROMPT,
-            tools=tools,
-            messages=messages,
-        ) as stream:
-            chunks: list[str] = []
+        # Retry loop for rate limits
+        response = None
+        chunks: list[str] = []
+        for attempt in range(MAX_RETRIES):
+            try:
+                chunks = []
+                with client.messages.stream(
+                    model=MODEL,
+                    max_tokens=4096,
+                    thinking={"type": "adaptive"},
+                    output_config={"effort": EFFORT},
+                    system=SYSTEM_PROMPT,
+                    tools=tools,
+                    messages=messages,
+                ) as stream:
+                    for event in stream:
+                        if event.type == "content_block_delta":
+                            if event.delta.type == "text_delta":
+                                print(event.delta.text, end="", flush=True)
+                                chunks.append(event.delta.text)
+                    response = stream.get_final_message()
+                break  # success — exit retry loop
 
-            for event in stream:
-                if event.type == "content_block_delta":
-                    if event.delta.type == "text_delta":
-                        print(event.delta.text, end="", flush=True)
-                        chunks.append(event.delta.text)
+            except anthropic.RateLimitError:
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_WAIT_S * (attempt + 1)
+                    print(
+                        f"\n  ⏳ Rate limited. Waiting {wait}s "
+                        f"(attempt {attempt + 1}/{MAX_RETRIES})...",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
-            response = stream.get_final_message()
+        if response is None:
+            break
 
         total_input  += response.usage.input_tokens
         total_output += response.usage.output_tokens
