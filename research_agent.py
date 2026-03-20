@@ -30,6 +30,12 @@ MAX_PAUSE_CONTINUATIONS = 5           # per task, handles server-side tool limit
 MAX_RETRIES   = 5                     # retries on rate limit (429)
 RETRY_WAIT_S  = 65                    # seconds to wait — just over 1 min window
 
+# ── Resume control ────────────────────────────────────────────────────────────
+# Set RESUME_FROM to the section number you want to start from (1-based).
+# Completed so far: 1, 2, 6, 7  →  set to 3 to pick up where we left off.
+# Set to 1 to start fresh (will overwrite the existing dossier).
+RESUME_FROM   = 3
+
 # Sonnet 4.6 pricing ($/1M tokens)
 PRICE_INPUT  = 3.00
 PRICE_OUTPUT = 15.00
@@ -251,29 +257,45 @@ def run():
     start_time  = time.time()
     total_cost  = 0.0
 
-    # Write dossier header
-    output_path.write_text(
-        f"# Research Dossier: Fashoda Conflict & Dreyfus Affair\n\n"
-        f"*Built by autonomous research agent — {datetime.now().strftime('%Y-%m-%d %H:%M')}*  \n"
-        f"*Budget: ${MAX_COST_USD:.2f} or {MAX_MINUTES} min | Model: {MODEL}*\n\n"
-        f"---\n\n"
-        f"**How to use this dossier:** Each section below was researched separately. "
-        f"Read through it to learn the material, follow the source links, and use it "
-        f"as the foundation for writing your own paper.\n\n"
-        f"---\n\n",
-        encoding="utf-8",
-    )
+    # Write header only on a fresh run; append on resume
+    resuming = RESUME_FROM > 1 and output_path.exists()
+    if not resuming:
+        output_path.write_text(
+            f"# Research Dossier: Fashoda Conflict & Dreyfus Affair\n\n"
+            f"*Built by autonomous research agent — {datetime.now().strftime('%Y-%m-%d %H:%M')}*  \n"
+            f"*Budget: ${MAX_COST_USD:.2f} or {MAX_MINUTES} min | Model: {MODEL}*\n\n"
+            f"---\n\n"
+            f"**How to use this dossier:** Each section below was researched separately. "
+            f"Read through it to learn the material, follow the source links, and use it "
+            f"as the foundation for writing your own paper.\n\n"
+            f"---\n\n",
+            encoding="utf-8",
+        )
+    else:
+        # Append a resume marker so it's clear in the file
+        with open(output_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"\n---\n\n"
+                f"*▶ Resumed — {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+                f"| Starting from section {RESUME_FROM}*\n\n"
+                f"---\n\n"
+            )
 
     print(f"{'='*62}")
-    print(f"  Research Dossier Builder")
+    print(f"  Research Dossier Builder{'  [RESUMING]' if resuming else ''}")
     print(f"  Model: {MODEL} | Effort: {EFFORT}")
     print(f"  Budget: ${MAX_COST_USD:.2f} or {MAX_MINUTES} min")
+    print(f"  Starting from section: {RESUME_FROM}/{len(RESEARCH_TASKS)}")
     print(f"  Output: {output_path.resolve()}")
     print(f"{'='*62}\n")
 
     completed = 0
 
     for i, (title, prompt) in enumerate(RESEARCH_TASKS):
+        # Skip already-completed sections
+        if i + 1 < RESUME_FROM:
+            continue
+
         elapsed_min = (time.time() - start_time) / 60
 
         # ── Check limits before starting each task ──
