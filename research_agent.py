@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+Autonomous historical research agent.
+
+Uses Claude Opus 4.6 with web search to autonomously research topics
+and produce a comparative analysis, similar to the autoresearch spirit
+but for historical/textual research instead of ML training.
+
+Usage:
+    python research_agent.py
+    ANTHROPIC_API_KEY=your-key python research_agent.py
+"""
+
+import anthropic
+from pathlib import Path
+from datetime import datetime
+
+# ── Research configuration ────────────────────────────────────────────────────
+
+TOPIC_A = "The Fashoda Conflict (1898)"
+TOPIC_B = "The Dreyfus Affair (1894–1906)"
+OUTPUT_FILE = "analysis.md"
+MAX_ITERATIONS = 15  # safety cap on server-side tool continuation loops
+
+RESEARCH_PROMPT = f"""You are an autonomous research agent. Conduct a thorough comparative analysis of:
+
+1. {TOPIC_A} — The Anglo-French confrontation at Fashoda on the Upper Nile
+2. {TOPIC_B} — The French military scandal involving Alfred Dreyfus
+
+**Instructions:**
+- Use web search extensively to gather accurate, detailed information about both events
+- Search for key facts, dates, key figures, causes, and outcomes for each
+- Search for scholarly perspectives and historical interpretations
+- Look for connections between the two events (they occurred in France in the same era)
+
+**Your analysis must cover:**
+1. Historical Context & Background
+2. Key Players and Motivations
+3. Political & Social Dimensions
+4. International vs. Domestic Focus
+5. Resolution and Outcomes
+6. Historical Legacy and Long-term Impact
+7. Comparative Themes (nationalism, imperialism, justice, military culture, antisemitism, colonialism)
+8. How the two crises intersected and what they reveal about France in the 1890s
+
+After completing your research, write a comprehensive comparative analysis (2500–4000 words).
+Format it clearly with headers and subheaders in Markdown.
+"""
+
+# ── Agent loop ────────────────────────────────────────────────────────────────
+
+def run():
+    client = anthropic.Anthropic()
+
+    tools = [
+        {"type": "web_search_20260209", "name": "web_search"},
+    ]
+
+    # Initial message
+    messages = [{"role": "user", "content": RESEARCH_PROMPT}]
+
+    print(f"{'='*60}")
+    print(f"  Autonomous Research Agent")
+    print(f"  Topic A: {TOPIC_A}")
+    print(f"  Topic B: {TOPIC_B}")
+    print(f"{'='*60}\n")
+
+    collected_text: list[str] = []
+    iteration = 0
+
+    while iteration < MAX_ITERATIONS:
+        iteration += 1
+        print(f"[Iteration {iteration}] Querying Claude Opus 4.6...\n")
+
+        with client.messages.stream(
+            model="claude-opus-4-6",
+            max_tokens=8192,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "max"},
+            tools=tools,
+            messages=messages,
+        ) as stream:
+            current_blocks: list[str] = []
+
+            for event in stream:
+                if event.type == "content_block_start":
+                    if hasattr(event, "content_block"):
+                        block_type = event.content_block.type
+                        if block_type == "thinking":
+                            print("[Thinking...] ", end="", flush=True)
+                        elif block_type == "text":
+                            print()  # newline before text starts
+
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        print(delta.text, end="", flush=True)
+                        current_blocks.append(delta.text)
+                    # thinking_delta: skip printing to keep output readable
+
+                elif event.type == "content_block_stop":
+                    if current_blocks:
+                        collected_text.append("".join(current_blocks))
+                        current_blocks = []
+
+            response = stream.get_final_message()
+
+        print(f"\n\n[stop_reason: {response.stop_reason}]")
+
+        # Append assistant turn to history
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "end_turn":
+            print("\n✓ Research complete.\n")
+            break
+
+        elif response.stop_reason == "pause_turn":
+            # Server-side tool loop hit its limit; re-send to continue
+            print("[Server-side tool paused — continuing...]\n")
+            messages = [
+                {"role": "user", "content": RESEARCH_PROMPT},
+                {"role": "assistant", "content": response.content},
+            ]
+
+        else:
+            print(f"[Unexpected stop reason: {response.stop_reason}]")
+            break
+
+    # ── Save output ───────────────────────────────────────────────────────────
+    full_text = "\n\n".join(collected_text).strip()
+
+    if not full_text:
+        print("No analysis text was generated.")
+        return
+
+    output_path = Path(OUTPUT_FILE)
+    header = (
+        f"# Comparative Analysis: {TOPIC_A} and {TOPIC_B}\n\n"
+        f"*Generated by autonomous research agent — "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}*\n\n"
+        f"---\n\n"
+    )
+
+    output_path.write_text(header + full_text, encoding="utf-8")
+    print(f"✓ Analysis saved to: {output_path.resolve()}")
+    print(f"  Word count: ~{len(full_text.split()):,}")
+
+
+if __name__ == "__main__":
+    run()
